@@ -8,16 +8,41 @@ export interface CandidateImage {
   message_id: string
 }
 
+export interface EventMessage {
+  type: string
+  content: string
+  sender_id: string
+  timestamp: string
+  message_id: string
+}
+
+export interface ApiEvent {
+  id: number
+  category: string
+  summary: string
+  status: string
+  update_time: string
+  create_time: string
+  is_merged: boolean
+  candidate_images: CandidateImage[]
+  messages: EventMessage[]
+}
+
+export interface ApiResponse {
+  events: ApiEvent[]
+}
+
 export interface IssueCard {
   id: string
-  eventId?: number // 添加这一行
-  originalMessageIds?: string[]
+  eventId: number
+  category: string
+  originalMessageIds: string[]
   reporterUserId: string
   reporterName: string
   recordTimestamp: string
   rawTextInput: string
   imageUrls: string[]
-  candidateImages?: CandidateImage[] // 添加这一行，存储完整的图片对象信息
+  candidateImages: CandidateImage[]
   description: string
   location: string
   responsibleParty: string
@@ -25,8 +50,7 @@ export interface IssueCard {
   lastUpdatedTimestamp: string
   projectId: string
   isDeleted: boolean
-  generatedDocumentIds?: string[]
-  isMergedCard?: boolean
+  isMergedCard: boolean
   mergedFromCardIds?: string[]
   mergedIntoCardId?: string
 }
@@ -47,7 +71,6 @@ export interface User {
   name: string
 }
 
-// 添加API文档类型
 export interface ApiDocument {
   id: number
   event_id: number

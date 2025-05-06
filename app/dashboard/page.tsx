@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { FilterBar } from "@/components/filter-bar"
 import { useAuth } from "@/lib/auth-provider"
-import type { IssueCard, IssueStatus } from "@/lib/types"
+import type { IssueCard, IssueStatus, ApiResponse, ApiEvent } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { MessageSquare, Loader2, Merge, AlertTriangle } from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
@@ -26,39 +26,6 @@ import { MergeConfirmationDialog } from "@/components/merge-confirmation-dialog"
 import debounce from "lodash/debounce"
 import { mockIssueCards } from "@/lib/mock-data" // 导入模拟数据
 
-// 定义API返回的事件数据结构
-interface EventImage {
-  image_key: string
-  sender_id: string
-  timestamp: string
-  image_data: string
-  message_id: string
-}
-
-interface EventMessage {
-  type: string
-  content: string
-  sender_id: string
-  timestamp: string
-  message_id: string
-}
-
-interface Event {
-  category: string
-  summary: string
-  id: number
-  is_merged: boolean
-  create_time: string
-  messages: EventMessage[]
-  candidate_images: EventImage[]
-  status: string
-  update_time: string
-}
-
-interface EventsResponse {
-  events: Event[]
-}
-
 // 状态码映射函数
 const mapStatusCodeToStatus = (statusCode: string): IssueStatus => {
   switch (statusCode) {
@@ -75,6 +42,89 @@ const mapStatusCodeToStatus = (statusCode: string): IssueStatus => {
   }
 }
 
+// 从消息或摘要中提取位置信息
+const extractLocation = (summary: string, messages: any[]): string => {
+  // 尝试从摘要中提取位置
+  const locationMatch = summary.match(/(\d+号楼|\w区|\w座)/)
+  if (locationMatch && locationMatch[1]) {
+    return locationMatch[1]
+  }
+
+  // 尝试从消息中提取位置
+  for (const message of messages) {
+    if (message.content) {
+      const msgLocationMatch = message.content.match(/(\d+号楼|\w区|\w座)/)
+      if (msgLocationMatch && msgLocationMatch[1]) {
+        return msgLocationMatch[1]
+      }
+    }
+  }
+
+  return "未指定位置"
+}
+
+// 从事件类别确定责任单位
+const determineResponsibleParty = (category: string): string => {
+  switch (category) {
+    case "质量问题":
+      return "质量部"
+    case "安全隐患":
+      return "安全部"
+    case "进度延误":
+      return "工程部"
+    case "材料问题":
+      return "材料部"
+    case "设备故障":
+      return "设备部"
+    case "讨论施工方案":
+      return "技术部"
+    default:
+      return "待指定"
+  }
+}
+
+// 将API事件转换为问题卡片
+const convertEventToIssueCard = (event: ApiEvent): IssueCard => {
+  // 提取第一条消息作为原始输入
+  const firstMessage = event.messages && event.messages.length > 0 ? event.messages[0].content : ""
+
+  // 提取所有消息ID
+  const messageIds = event.messages ? event.messages.map((m) => m.message_id) : []
+
+  // 提取图片URL
+  const imageUrls =
+    event.candidate_images && event.candidate_images.length > 0
+      ? event.candidate_images.map((img) => img.image_data)
+      : []
+
+  // 从消息中提取位置
+  const location = extractLocation(event.summary, event.messages)
+
+  // 根据类别确定责任单位
+  const responsibleParty = determineResponsibleParty(event.category)
+
+  return {
+    id: event.id.toString(),
+    eventId: event.id,
+    category: event.category,
+    originalMessageIds: messageIds,
+    reporterUserId: event.messages && event.messages.length > 0 ? event.messages[0].sender_id : "unknown",
+    reporterName: "系统聚类",
+    recordTimestamp: event.create_time,
+    rawTextInput: firstMessage,
+    imageUrls: imageUrls,
+    candidateImages: event.candidate_images || [],
+    description: event.summary,
+    location: location,
+    responsibleParty: responsibleParty,
+    status: mapStatusCodeToStatus(event.status),
+    lastUpdatedTimestamp: event.update_time,
+    projectId: "project123",
+    isDeleted: false,
+    isMergedCard: event.is_merged,
+  }
+}
+
 // API状态检查组件
 const APIStatusChecker = () => {
   const [apiStatus, setApiStatus] = useState<"loading" | "online" | "offline">("loading")
@@ -82,7 +132,7 @@ const APIStatusChecker = () => {
   useEffect(() => {
     const checkAPIStatus = async () => {
       try {
-        const response = await axios.get("/api/health") // 替换为你的健康检查API端点
+        const response = await axios.get("/api/health")
         if (response.status === 200) {
           setApiStatus("online")
         } else {
@@ -146,7 +196,7 @@ export default function DashboardPage() {
   const [mergeDialogOpen, setMergeDialogOpen] = useState(false)
   const [isMerging, setIsMerging] = useState(false)
   const [lastFetchTime, setLastFetchTime] = useState<number>(0)
-  const [useMockData, setUseMockData] = useState(true) // 添加状态来控制是否使用模拟数据
+  const [useMockData, setUseMockData] = useState(false) // 默认使用API数据
   const CACHE_DURATION = 30000 // 30秒缓存
 
   // 将fetchIssueCards改为useCallback包装的函数
@@ -168,55 +218,31 @@ export default function DashboardPage() {
           return
         }
 
-        const response = await axios.get<EventsResponse>("/api/events")
+        // 直接从API获取数据
+        console.log("从API获取数据")
+        const API_BASE_URL = "http://43.139.19.144:8000"
+
+        // 获取认证令牌
+        const token = getAuthToken()
+        const headers: Record<string, string> = {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        }
+
+        if (token) {
+          headers["Authorization"] = token
+        }
+
+        const response = await axios.get<ApiResponse>(`${API_BASE_URL}/events-db`, {
+          timeout: 10000,
+          headers,
+        })
 
         if (response.data && response.data.events) {
+          console.log(`成功从API获取 ${response.data.events.length} 个事件`)
+
           // 将API返回的事件转换为问题卡片格式
-          const cards: IssueCard[] = response.data.events.map((event) => {
-            // 提取第一条消息作为原始输入
-            const firstMessage = event.messages && event.messages.length > 0 ? event.messages[0].content : ""
-
-            // 提取所有消息ID
-            const messageIds = event.messages ? event.messages.map((m) => m.message_id) : []
-
-            // 提取图片URL
-            const imageUrls =
-              event.candidate_images && event.candidate_images.length > 0
-                ? event.candidate_images.map((img) => img.image_data || `/api/image/${img.image_key}`)
-                : ["/placeholder.svg?key=event-image"]
-
-            // 从消息中提取位置和责任单位
-            let location = ""
-            let responsibleParty = ""
-
-            // 尝试从摘要或消息中提取位置
-            const locationMatch = event.summary.match(/(\d+号楼|\w区|\w座)/)
-            if (locationMatch && locationMatch[1]) {
-              location = locationMatch[1]
-            }
-
-            // 责任单位暂时设为默认值，后续可以根据实际数据调整
-            responsibleParty = "待指定"
-
-            return {
-              id: event.id.toString(), // 直接使用数字ID，不添加前缀
-              eventId: event.id, // 保存原始的eventId
-              originalMessageIds: messageIds, // 保存所有消息ID
-              reporterUserId: event.messages && event.messages.length > 0 ? event.messages[0].sender_id : "unknown",
-              reporterName: "系统聚类",
-              recordTimestamp: event.create_time || new Date().toISOString(),
-              rawTextInput: firstMessage,
-              imageUrls: imageUrls,
-              description: event.summary || "未提供描述",
-              location: location || "未指定位置",
-              responsibleParty: responsibleParty,
-              status: mapStatusCodeToStatus(event.status),
-              lastUpdatedTimestamp: event.update_time || new Date().toISOString(),
-              projectId: "project123",
-              isDeleted: false,
-              isMergedCard: event.is_merged || false,
-            }
-          })
+          const cards: IssueCard[] = response.data.events.map(convertEventToIssueCard)
 
           setIssueCards(cards)
           setFilteredIssues(cards)
@@ -234,12 +260,35 @@ export default function DashboardPage() {
           description: "无法获取问题卡片数据，请稍后再试",
           variant: "destructive",
         })
+
+        // 失败时使用模拟数据
+        setIssueCards(mockIssueCards)
+        setFilteredIssues(mockIssueCards)
       } finally {
         setIsLoading(false)
       }
-    }, 500), // 500ms的防抖时间
-    [toast, useMockData], // 依赖项，添加useMockData
+    }, 500),
+    [toast, useMockData],
   )
+
+  // 获取认证令牌
+  const getAuthToken = (): string | null => {
+    if (typeof window === "undefined") return null
+
+    try {
+      const storedUser = localStorage.getItem("user")
+      if (storedUser) {
+        const user = JSON.parse(storedUser)
+        if (user.token) {
+          return `${user.tokenType || "Bearer"} ${user.token}`
+        }
+      }
+    } catch (error) {
+      console.error("获取认证令牌失败:", error)
+    }
+
+    return null
+  }
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -432,7 +481,8 @@ export default function DashboardPage() {
           issue.description.toLowerCase().includes(query) ||
           issue.location.toLowerCase().includes(query) ||
           issue.responsibleParty.toLowerCase().includes(query) ||
-          issue.rawTextInput.toLowerCase().includes(query),
+          issue.rawTextInput.toLowerCase().includes(query) ||
+          issue.category.toLowerCase().includes(query),
       )
     }
 
